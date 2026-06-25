@@ -387,6 +387,8 @@ public interface EmulatorConfig {
     interface BlobServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        Optional<List<String>> hierarchicalNamespaceAccounts();
     }
 
     interface QueueServiceConfig {

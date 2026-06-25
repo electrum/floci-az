@@ -299,6 +299,29 @@ public class BlobServiceTest {
     }
 
     @Test
+    void listBlobsHonorsStartFrom() {
+        given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);
+        for (String name : new String[] {"a.txt", "b.txt", "c.txt"}) {
+            given()
+                .header("x-ms-blob-type", "BlockBlob")
+                .body(name)
+                .put("/{account}/{container}/{blob}", ACCOUNT, CONTAINER, name);
+        }
+
+        String response = given()
+            .queryParam("startFrom", "b.txt")
+            .when().get("/{account}/{container}?restype=container&comp=list", ACCOUNT, CONTAINER)
+            .then()
+            .statusCode(200)
+            .contentType(containsString("xml"))
+            .extract().asString();
+
+        assertThat(response, not(containsString("<Blob><Name>a.txt</Name>")));
+        assertThat(response, containsString("<Blob><Name>b.txt</Name>"));
+        assertThat(response, containsString("<Blob><Name>c.txt</Name>"));
+    }
+
+    @Test
     void rangeRequestReturnsPartialContent() {
         given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);
         given()

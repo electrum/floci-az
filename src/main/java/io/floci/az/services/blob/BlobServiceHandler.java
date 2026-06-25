@@ -8,6 +8,7 @@ import io.floci.az.core.XmlBuilder;
 import io.floci.az.core.XmlUtils;
 import io.floci.az.core.storage.StorageBackend;
 import io.floci.az.core.storage.StorageFactory;
+import io.floci.az.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -47,10 +48,12 @@ public class BlobServiceHandler implements AzureServiceHandler {
             Pattern.compile("<(?:Latest|Committed|Uncommitted)>([^<]+)</(?:Latest|Committed|Uncommitted)>");
 
     private final StorageBackend<String, StoredObject> store;
+    private final Set<String> hierarchicalNamespaceAccounts;
 
     @Inject
-    public BlobServiceHandler(StorageFactory storageFactory) {
+    public BlobServiceHandler(StorageFactory storageFactory, EmulatorConfig config) {
         this.store = storageFactory.create("blob");
+        this.hierarchicalNamespaceAccounts = Set.copyOf(config.services().blob().hierarchicalNamespaceAccounts().orElse(List.of()));
     }
 
     @Override
@@ -94,9 +97,20 @@ public class BlobServiceHandler implements AzureServiceHandler {
             String[] parts = path.split("/", 2);
             String containerName = parts[0];
             String blobName = parts.length > 1 ? parts[1] : "";
+            if (!blobName.isEmpty()) {
+                Optional<String> normalizedBlobName = normalizePath(blobName);
+                if (normalizedBlobName.isEmpty()) {
+                    return new AzureErrorResponse("InvalidQueryParameterValue",
+                            "Value for one of the query parameters specified in the request URI is invalid.")
+                            .toXmlResponse(400);
+                }
+                blobName = normalizedBlobName.orElseThrow();
+            }
 
             if (blobName.isEmpty()) {
-                if ("GET".equalsIgnoreCase(method) && "list".equals(query.get("comp"))) {
+                if ("GET".equalsIgnoreCase(method) && "filesystem".equals(query.get("resource"))) {
+                    response = listDfsPaths(request, containerName);
+                } else if ("GET".equalsIgnoreCase(method) && "list".equals(query.get("comp"))) {
                     response = listBlobs(request, containerName);
                 } else if ("PUT".equalsIgnoreCase(method) && "container".equals(query.get("restype"))) {
                     response = createContainer(request, containerName);
@@ -104,6 +118,14 @@ public class BlobServiceHandler implements AzureServiceHandler {
                     response = deleteContainer(request, containerName);
                 } else if (("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) && "container".equals(query.get("restype"))) {
                     response = getContainer(request, containerName, "HEAD".equalsIgnoreCase(method));
+                } else if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
+                    if (hierarchicalNamespaceAccounts.contains(request.accountName())) {
+                        response = Response.ok("HEAD".equalsIgnoreCase(method) ? null : new byte[0])
+                                .header(HttpHeaders.CONTENT_LENGTH, 0)
+                                .build();
+                    } else {
+                        response = getBlob(request, containerName, "/", "HEAD".equalsIgnoreCase(method));
+                    }
                 } else {
                     response = new AzureErrorResponse("NotImplemented", "The requested operation is not implemented.")
                             .toXmlResponse(501);
@@ -122,6 +144,12 @@ public class BlobServiceHandler implements AzureServiceHandler {
                 } else if (("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method))
                         && "blocklist".equals(comp)) {
                     response = getBlockList(request, containerName, blobName);
+                } else if ("PUT".equalsIgnoreCase(method) && request.headers().getHeaderString("x-ms-rename-source") != null) {
+                    response = renameDfsPath(request, containerName, blobName);
+                } else if ("PUT".equalsIgnoreCase(method) && isDfsPathCreate(request)) {
+                    response = createDfsPath(request, containerName, blobName, isDfsDirectoryCreate(request));
+                } else if ("GET".equalsIgnoreCase(method) && "filesystem".equals(query.get("resource"))) {
+                    response = listDfsPaths(request, containerName, blobName);
                 } else if ("PUT".equalsIgnoreCase(method)) {
                     response = putBlob(request, containerName, blobName);
                 } else if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
@@ -239,6 +267,10 @@ public class BlobServiceHandler implements AzureServiceHandler {
                 return conditionFailure;
             }
 
+            if (hierarchicalNamespaceAccounts.contains(request.accountName())) {
+                createParentDirectories(request.accountName(), containerName, blobName);
+            }
+
             byte[] data = request.bodyStream().readAllBytes();
             Map<String, String> metadata = new HashMap<>();
             String blobType = request.headers().getHeaderString("x-ms-blob-type");
@@ -261,6 +293,58 @@ public class BlobServiceHandler implements AzureServiceHandler {
         } catch (IOException e) {
             return Response.serverError().build();
         }
+    }
+
+    private Response createDfsPath(AzureRequest request, String containerName, String blobName, boolean directory) {
+        if (store.get(nsKey(request.accountName(), containerName)).isEmpty()) {
+            return new AzureErrorResponse("ContainerNotFound", "The specified container does not exist.")
+                    .toXmlResponse(Response.Status.NOT_FOUND.getStatusCode());
+        }
+
+        Optional<StoredObject> existing = store.get(objKey(request.accountName(), containerName, blobName));
+        if (existing.isPresent() && "*".equals(request.headers().getHeaderString("If-None-Match"))) {
+            return new AzureErrorResponse("PathAlreadyExists", "The specified path already exists.")
+                    .toXmlResponse(Response.Status.CONFLICT.getStatusCode());
+        }
+        Response conditionFailure = validateBlobConditions(request, existing);
+        if (conditionFailure != null) {
+            return conditionFailure;
+        }
+
+        if (directory) {
+            createParentDirectories(request.accountName(), containerName, blobName);
+        }
+
+        Map<String, String> metadata = new HashMap<>();
+        metadata.put("BlobType", "BlockBlob");
+        metadata.put("Content-Type", "application/octet-stream");
+        metadata.put("Name", blobName);
+        metadata.put("IsDirectory", Boolean.toString(directory));
+        metadata.put(USER_METADATA_PREFIX + "hdi_isfolder", Boolean.toString(directory));
+        String etag = UUID.randomUUID().toString();
+        store.put(objKey(request.accountName(), containerName, blobName),
+                new StoredObject(blobName, new byte[0], metadata, Instant.now(), etag));
+
+        return Response.status(Response.Status.CREATED)
+                .header("Last-Modified", RFC1123_DATE_TIME.format(Instant.now()))
+                .header("ETag", etag)
+                .header("x-ms-resource-type", directory ? "directory" : "file")
+                .header("x-ms-meta-hdi_isfolder", Boolean.toString(directory))
+                .header("x-ms-request-server-encrypted", "true")
+                .header("Content-Length", 0)
+                .build();
+    }
+
+    private static boolean isDfsPathCreate(AzureRequest request) {
+        String resource = request.queryParams().get("resource");
+        String resourceType = request.headers().getHeaderString("x-ms-resource-type");
+        return "directory".equals(resource) || "file".equals(resource)
+                || "directory".equals(resourceType) || "file".equals(resourceType);
+    }
+
+    private static boolean isDfsDirectoryCreate(AzureRequest request) {
+        return "directory".equals(request.queryParams().get("resource"))
+                || "directory".equals(request.headers().getHeaderString("x-ms-resource-type"));
     }
 
     private Response getBlob(AzureRequest request, String containerName, String blobName, boolean headOnly) {
@@ -291,6 +375,17 @@ public class BlobServiceHandler implements AzureServiceHandler {
                 rangeStart = Long.parseLong(parts[0]);
                 rangeEnd   = parts.length > 1 && !parts[1].isEmpty()
                         ? Long.parseLong(parts[1]) : totalSize - 1;
+                if (totalSize == 0 && rangeStart == 0 && rangeEnd == -1) {
+                    return Response.ok(new byte[0])
+                            .header("Last-Modified", RFC1123_DATE_TIME.format(so.lastModified()))
+                            .header("ETag", so.etag())
+                            .header("x-ms-blob-type", so.metadata().getOrDefault("BlobType", "BlockBlob"))
+                            .header(HttpHeaders.CONTENT_TYPE, so.metadata().getOrDefault("Content-Type", "application/octet-stream"))
+                            .header(HttpHeaders.CONTENT_LENGTH, 0)
+                            .header("x-ms-blob-content-length", 0)
+                            .header("Accept-Ranges", "bytes")
+                            .build();
+                }
                 if (rangeStart < 0 || rangeStart >= totalSize) {
                     return Response.fromResponse(new AzureErrorResponse("InvalidRange",
                             "The range specified is invalid for the current size of the resource.")
@@ -311,6 +406,7 @@ public class BlobServiceHandler implements AzureServiceHandler {
                 .header("Last-Modified", RFC1123_DATE_TIME.format(so.lastModified()))
                 .header("ETag", so.etag())
                 .header("x-ms-blob-type", so.metadata().getOrDefault("BlobType", "BlockBlob"))
+                .header("x-ms-resource-type", Boolean.parseBoolean(so.metadata().getOrDefault("IsDirectory", "false")) ? "directory" : "file")
                 .header(HttpHeaders.CONTENT_TYPE, so.metadata().getOrDefault("Content-Type", "application/octet-stream"))
                 .header(HttpHeaders.CONTENT_LENGTH, contentLength)
                 .header("Content-Range", String.format("bytes %d-%d/%d", rangeStart, rangeEnd, totalSize))
@@ -339,6 +435,14 @@ public class BlobServiceHandler implements AzureServiceHandler {
         Response conditionFailure = validateBlobConditions(request, object);
         if (conditionFailure != null) {
             return conditionFailure;
+        }
+        if (Boolean.parseBoolean(object.orElseThrow().metadata().getOrDefault("IsDirectory", "false"))
+                && Boolean.parseBoolean(request.queryParams().getOrDefault("recursive", "false"))) {
+            String prefix = objKey(request.accountName(), containerName, blobName + "/");
+            store.keys().stream()
+                    .filter(key -> key.startsWith(prefix))
+                    .toList()
+                    .forEach(store::delete);
         }
         store.delete(objKey(request.accountName(), containerName, blobName));
         return Response.status(Response.Status.ACCEPTED).build();
@@ -399,6 +503,7 @@ public class BlobServiceHandler implements AzureServiceHandler {
         String prefix = request.queryParams().getOrDefault("prefix", "");
         String delimiter = request.queryParams().getOrDefault("delimiter", "");
         String marker = request.queryParams().getOrDefault("marker", "");
+        String startFrom = request.queryParams().getOrDefault("startFrom", "");
         int maxResults = parseMaxResults(request.queryParams().get("maxresults"));
         String keyPrefix = objKey(request.accountName(), containerName, prefix);
 
@@ -430,8 +535,9 @@ public class BlobServiceHandler implements AzureServiceHandler {
         blobs.sort(Comparator.comparing(BlobModels.BlobItem::Name));
 
         int start = 0;
-        if (!marker.isEmpty()) {
-            while (start < blobs.size() && blobs.get(start).Name().compareTo(marker) < 0) {
+        String lowerBound = !marker.isEmpty() ? marker : startFrom;
+        if (!lowerBound.isEmpty()) {
+            while (start < blobs.size() && blobs.get(start).Name().compareTo(lowerBound) < 0) {
                 start++;
             }
         }
@@ -445,6 +551,170 @@ public class BlobServiceHandler implements AzureServiceHandler {
 
         return Response.ok(XmlUtils.toXml(response)).type(MediaType.APPLICATION_XML).build();
     }
+
+    private Response renameDfsPath(AzureRequest request, String targetContainerName, String targetBlobName) {
+        String source = request.headers().getHeaderString("x-ms-rename-source");
+        if (source == null || !source.startsWith("/")) {
+            return new AzureErrorResponse("InvalidSourceUri", "The source URI is invalid.").toXmlResponse(400);
+        }
+
+        String[] sourceParts = source.substring(1).split("/", 2);
+        if (sourceParts.length != 2) {
+            return new AzureErrorResponse("InvalidSourceUri", "The source URI is invalid.").toXmlResponse(400);
+        }
+
+        String sourceContainerName = sourceParts[0];
+        String sourceBlobName = java.net.URLDecoder.decode(sourceParts[1], StandardCharsets.UTF_8);
+        Optional<String> normalizedSourceBlobName = normalizePath(sourceBlobName);
+        if (normalizedSourceBlobName.isEmpty()) {
+            return new AzureErrorResponse("InvalidQueryParameterValue",
+                    "Value for one of the query parameters specified in the request URI is invalid.")
+                    .toXmlResponse(400);
+        }
+        sourceBlobName = normalizedSourceBlobName.orElseThrow();
+
+        Optional<StoredObject> sourceObject = store.get(objKey(request.accountName(), sourceContainerName, sourceBlobName));
+        if (sourceObject.isEmpty()) {
+            return new AzureErrorResponse("BlobNotFound", "The specified blob does not exist.")
+                    .toXmlResponse(Response.Status.NOT_FOUND.getStatusCode());
+        }
+        if (!sourceContainerName.equals(targetContainerName)) {
+            return new AzureErrorResponse("InvalidSourceUri", "The source URI is invalid.").toXmlResponse(400);
+        }
+        if (store.get(objKey(request.accountName(), targetContainerName, targetBlobName)).isPresent()) {
+            return new AzureErrorResponse("PathAlreadyExists", "The specified path already exists.")
+                    .toXmlResponse(Response.Status.PRECONDITION_FAILED.getStatusCode());
+        }
+
+        StoredObject so = sourceObject.orElseThrow();
+        Map<String, String> metadata = new HashMap<>(so.metadata());
+        metadata.put("Name", targetBlobName);
+        String etag = UUID.randomUUID().toString();
+        store.put(objKey(request.accountName(), targetContainerName, targetBlobName),
+                new StoredObject(targetBlobName, so.data(), metadata, Instant.now(), etag));
+        store.delete(objKey(request.accountName(), sourceContainerName, sourceBlobName));
+        if (Boolean.parseBoolean(so.metadata().getOrDefault("IsDirectory", "false"))) {
+            String sourcePrefix = objKey(request.accountName(), sourceContainerName, sourceBlobName + "/");
+            List<StoredObject> children = store.scan(key -> key.startsWith(sourcePrefix));
+            for (StoredObject child : children) {
+                String childName = child.metadata().getOrDefault("Name", child.key());
+                String targetChildName = targetBlobName + childName.substring(sourceBlobName.length());
+                Map<String, String> childMetadata = new HashMap<>(child.metadata());
+                childMetadata.put("Name", targetChildName);
+                store.put(objKey(request.accountName(), targetContainerName, targetChildName),
+                        new StoredObject(targetChildName, child.data(), childMetadata, Instant.now(), UUID.randomUUID().toString()));
+                store.delete(objKey(request.accountName(), sourceContainerName, childName));
+            }
+        }
+
+        return Response.status(Response.Status.CREATED)
+                .header("ETag", etag)
+                .header("Last-Modified", RFC1123_DATE_TIME.format(Instant.now()))
+                .build();
+    }
+
+    private void createParentDirectories(String accountName, String containerName, String blobName) {
+        int separator = blobName.indexOf('/');
+        while (separator >= 0) {
+            String directoryName = blobName.substring(0, separator);
+            String key = objKey(accountName, containerName, directoryName);
+            if (store.get(key).isEmpty()) {
+                Map<String, String> metadata = new HashMap<>();
+                metadata.put("BlobType", "BlockBlob");
+                metadata.put("Content-Type", "application/octet-stream");
+                metadata.put("Name", directoryName);
+                metadata.put("IsDirectory", "true");
+                metadata.put(USER_METADATA_PREFIX + "hdi_isfolder", "true");
+                store.put(key, new StoredObject(directoryName, new byte[0], metadata, Instant.now(), UUID.randomUUID().toString()));
+            }
+            separator = blobName.indexOf('/', separator + 1);
+        }
+    }
+
+    private Response listDfsPaths(AzureRequest request, String containerName) {
+        return listDfsPaths(request, containerName, "");
+    }
+
+    private Response listDfsPaths(AzureRequest request, String containerName, String defaultDirectory) {
+        String directory = request.queryParams().get("directory");
+        if (directory == null || directory.isEmpty()) {
+            directory = defaultDirectory;
+        }
+        if (!directory.isEmpty()) {
+            Optional<String> normalizedDirectory = normalizePath(directory);
+            if (normalizedDirectory.isEmpty()) {
+                return new AzureErrorResponse("InvalidQueryParameterValue",
+                        "Value for one of the query parameters specified in the request URI is invalid.")
+                        .toXmlResponse(400);
+            }
+            directory = normalizedDirectory.orElseThrow();
+        }
+        boolean recursive = Boolean.parseBoolean(request.queryParams().getOrDefault("recursive", "false"));
+        String containerPrefix = objKey(request.accountName(), containerName, "");
+        String directoryPrefix = directory.isEmpty() ? "" : directory + "/";
+        String listedDirectory = directory;
+
+        Map<String, DfsPath> paths = new HashMap<>();
+        store.scan(key -> key.startsWith(containerPrefix)).forEach(object -> {
+            String blobName = object.key();
+            if (!directoryPrefix.isEmpty() && !blobName.startsWith(directoryPrefix)) {
+                return;
+            }
+            String relativeName = directoryPrefix.isEmpty() ? blobName : blobName.substring(directoryPrefix.length());
+            if (relativeName.isEmpty()) {
+                return;
+            }
+
+            int separator = relativeName.indexOf('/');
+            if (!recursive && separator >= 0) {
+                String childDirectory = directoryPrefix + relativeName.substring(0, separator);
+                paths.putIfAbsent(childDirectory, new DfsPath(childDirectory, true, 0, object.lastModified(), object.etag()));
+                return;
+            }
+
+            boolean directoryPath = Boolean.parseBoolean(object.metadata().getOrDefault("IsDirectory", "false"));
+            addParentDirectories(paths, blobName, listedDirectory, object.lastModified(), object.etag());
+            paths.put(blobName, new DfsPath(blobName, directoryPath, directoryPath ? 0 : object.data().length, object.lastModified(), object.etag()));
+        });
+        if (!directory.isEmpty()) {
+            paths.remove(directory);
+        }
+
+        String pathsJson = paths.values().stream()
+                .sorted(Comparator.comparing(DfsPath::name))
+                .map(BlobServiceHandler::pathJson)
+                .collect(Collectors.joining(","));
+        return Response.ok("{\"paths\":[" + pathsJson + "]}")
+                .type(MediaType.APPLICATION_JSON)
+                .build();
+    }
+
+    private static void addParentDirectories(Map<String, DfsPath> paths, String blobName, String directory, Instant lastModified, String etag) {
+        int separator = blobName.indexOf('/');
+        String directoryPrefix = directory.isEmpty() ? "" : directory + "/";
+        while (separator >= 0) {
+            String parentDirectory = blobName.substring(0, separator);
+            if (directory.isEmpty() || parentDirectory.startsWith(directoryPrefix)) {
+                paths.putIfAbsent(parentDirectory, new DfsPath(parentDirectory, true, 0, lastModified, etag));
+            }
+            separator = blobName.indexOf('/', separator + 1);
+        }
+    }
+
+    private static String pathJson(DfsPath path) {
+        return "{"
+                + "\"contentLength\":\"" + path.contentLength() + "\","
+                + "\"etag\":\"" + path.etag() + "\","
+                + "\"group\":\"$superuser\","
+                + "\"isDirectory\":\"" + path.directory() + "\","
+                + "\"lastModified\":\"" + RFC1123_DATE_TIME.format(path.lastModified()) + "\","
+                + "\"name\":\"" + path.name() + "\","
+                + "\"owner\":\"$superuser\","
+                + "\"permissions\":\"" + (path.directory() ? "rwxr-x---" : "rw-r-----") + "\""
+                + "}";
+    }
+
+    private record DfsPath(String name, boolean directory, long contentLength, Instant lastModified, String etag) {}
 
     private static int parseMaxResults(String value) {
         if (value == null || value.isBlank()) {
@@ -670,6 +940,24 @@ public class BlobServiceHandler implements AzureServiceHandler {
 
     private static String objKey(String accountName, String containerName, String blobName) {
         return accountName + "/" + containerName + "/" + blobName;
+    }
+
+    private static Optional<String> normalizePath(String path) {
+        Deque<String> segments = new ArrayDeque<>();
+        for (String segment : path.split("/")) {
+            if (segment.isEmpty() || ".".equals(segment)) {
+                continue;
+            }
+            if ("..".equals(segment)) {
+                if (segments.isEmpty()) {
+                    return Optional.empty();
+                }
+                segments.removeLast();
+                continue;
+            }
+            segments.addLast(segment);
+        }
+        return Optional.of(String.join("/", segments));
     }
 
     private static Map<String, String> readUserMetadata(AzureRequest request) {

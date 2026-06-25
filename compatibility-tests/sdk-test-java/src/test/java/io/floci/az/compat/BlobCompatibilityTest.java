@@ -283,6 +283,20 @@ class BlobCompatibilityTest {
         client.deleteBlobContainer(name);
     }
 
+    @Test
+    @DisplayName("empty blob input stream: reads empty content")
+    void emptyBlobInputStreamReadsEmptyContent() throws Exception {
+        String name = containerName();
+        BlobContainerClient container = client.createBlobContainer(name);
+        BlobClient blob = container.getBlobClient("empty-stream.txt");
+
+        blob.upload(new java.io.ByteArrayInputStream(new byte[0]), 0, true);
+
+        assertEquals(0, blob.getBlockBlobClient().openInputStream().readAllBytes().length);
+
+        client.deleteBlobContainer(name);
+    }
+
     // --- Block Blob ---
 
     @Test
