@@ -178,6 +178,18 @@ public class ArmHandler implements AzureServiceHandler {
 
         // ── checkNameAvailability ──────────────────────────────────────────────
         // az CLI probes this before creating storage accounts / key vaults / etc.
+        if (path.matches("subscriptions/[^/]+/providers/Microsoft\\.Storage/checkNameAvailability([?].*)?")) {
+            String account = bodyString(parseBody(req), "name", "");
+            boolean available = storageAccounts.values().stream()
+                    .noneMatch(resource -> account.equals(resource.get("name")));
+            if (!available) {
+                return Response.ok(Map.of(
+                        "nameAvailable", false,
+                        "reason", "AlreadyExists",
+                        "message", "The storage account named " + account + " is already taken.")).build();
+            }
+            return Response.ok(Map.of("nameAvailable", true)).build();
+        }
         if (path.matches("subscriptions/[^/]+/providers/Microsoft\\.[^/]+/checkNameAvailability([?].*)?")) {
             return Response.ok(Map.of("nameAvailable", true)).build();
         }
