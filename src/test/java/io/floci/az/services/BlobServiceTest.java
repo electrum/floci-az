@@ -2045,6 +2045,21 @@ public class BlobServiceTest {
     }
 
     @Test
+    void dataLakeCheckAccessRejectsFlatNamespaceAccount() {
+        String account = "flataccount";
+        given().put("/{account}/{container}?restype=container", account, CONTAINER);
+
+        given()
+            .header("Host", account + ".dfs.core.windows.net")
+            .queryParam("action", "checkAccess")
+            .queryParam("fsAction", "r--")
+            .when().head("/{container}", CONTAINER)
+            .then()
+            .statusCode(400)
+            .header("x-ms-error-code", "InvalidQueryParameterValue");
+    }
+
+    @Test
     void dataLakePathLeaseSupportsHadoopPostApiAndWriteGuard() {
         String leaseId = "11111111-1111-1111-1111-111111111111";
         given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);

@@ -968,6 +968,11 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
         if (authFailure != null) {
             return authFailure;
         }
+        if (!isHierarchicalNamespaceEnabled(request.accountName())) {
+            return new AzureErrorResponse("InvalidQueryParameterValue",
+                    "Value for one of the query parameters specified in the request URI is invalid.")
+                    .toDataLakeJsonResponse(Response.Status.BAD_REQUEST.getStatusCode());
+        }
         if (store.get(nsKey(request.accountName(), filesystem)).isEmpty()) {
             return new AzureErrorResponse("FilesystemNotFound", "The specified filesystem does not exist.")
                     .toDataLakeJsonResponse(Response.Status.NOT_FOUND.getStatusCode());
