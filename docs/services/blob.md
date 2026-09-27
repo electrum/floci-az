@@ -91,6 +91,7 @@ floci-az:
   services:
     blob:
       enabled: true
+      hierarchical-namespace-accounts: devstoreaccount1
   storage:
     services:
       blob:
@@ -101,6 +102,7 @@ floci-az:
 | Property | Env var | Default | Description |
 |---|---|---|---|
 | `enabled` | `FLOCI_AZ_SERVICES_BLOB_ENABLED` | `true` | Enables the Blob Storage service |
+| `hierarchical-namespace-accounts` | `FLOCI_AZ_SERVICES_BLOB_HIERARCHICAL_NAMESPACE_ACCOUNTS` | `devstoreaccount1` | Comma-separated account names with hierarchical namespace enabled |
 | `storage.services.blob.mode` | `FLOCI_AZ_STORAGE_SERVICES_BLOB_MODE` | *(inherits `storage.mode`)* | Per-service backend override (`memory` / `persistent` / `hybrid` / `wal`) |
 | `storage.services.blob.flush-interval-ms` | `FLOCI_AZ_STORAGE_SERVICES_BLOB_FLUSH_INTERVAL_MS` | `5000` | Background flush-to-disk interval for the `hybrid` mode only; ignored by `memory` / `persistent` / `wal` (`wal` compacts on `storage.wal.compaction-interval-ms` instead) |
 
