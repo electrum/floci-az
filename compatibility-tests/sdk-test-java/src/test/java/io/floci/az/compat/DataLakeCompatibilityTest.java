@@ -15,6 +15,7 @@ import com.azure.storage.file.datalake.DataLakeServiceClientBuilder;
 import com.azure.storage.file.datalake.models.DataLakeStorageException;
 import com.azure.storage.file.datalake.models.ListPathsOptions;
 import com.azure.storage.file.datalake.models.PathItem;
+import com.azure.storage.file.datalake.models.PathPermissions;
 import com.azure.storage.file.datalake.models.UserDelegationKey;
 import com.azure.storage.file.datalake.sas.DataLakeServiceSasSignatureValues;
 import com.azure.storage.file.datalake.sas.FileSystemSasPermission;
@@ -92,6 +93,12 @@ class DataLakeCompatibilityTest {
                     () -> flatClient.getFileSystemClient(name).getDirectoryClient("").getAccessControl());
             assertEquals(400, failure.getStatusCode());
             assertEquals("HierarchicalNamespaceNotEnabled", failure.getErrorCode());
+
+            DataLakeStorageException setFailure = assertThrows(DataLakeStorageException.class,
+                    () -> flatClient.getFileSystemClient(name).getDirectoryClient("")
+                            .setPermissions(PathPermissions.parseOctal("0750"), null, null));
+            assertEquals(400, setFailure.getStatusCode());
+            assertEquals("HierarchicalNamespaceNotEnabled", setFailure.getErrorCode());
         } finally {
             container.delete();
         }
