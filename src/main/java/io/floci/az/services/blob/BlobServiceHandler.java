@@ -210,7 +210,7 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
                 } else if (dataLakeRequest && "HEAD".equalsIgnoreCase(method)
                         && "checkAccess".equals(action)) {
                     response = checkDataLakeAccess(request, containerName, null);
-                } else if (dataLakeRequest && "PUT".equalsIgnoreCase(method)
+                } else if (dataLakeRequest && ("PUT".equalsIgnoreCase(method) || "PATCH".equalsIgnoreCase(method))
                         && "setAccessControl".equals(action)) {
                     response = setDataLakeAccessControl(request, containerName, null);
                 } else if (dataLakeRequest && "PUT".equalsIgnoreCase(method)
@@ -253,7 +253,8 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
                     response = flushDataLakePath(request, containerName, blobName);
                 } else if (dataLakeRequest && "PUT".equalsIgnoreCase(method) && "setProperties".equals(action)) {
                     response = setDataLakePathProperties(request, containerName, blobName);
-                } else if (dataLakeRequest && "PUT".equalsIgnoreCase(method) && "setAccessControl".equals(action)) {
+                } else if (dataLakeRequest && ("PUT".equalsIgnoreCase(method) || "PATCH".equalsIgnoreCase(method))
+                        && "setAccessControl".equals(action)) {
                     response = setDataLakeAccessControl(request, containerName, blobName);
                 } else if (dataLakeRequest && "POST".equalsIgnoreCase(method)
                         && request.headers().getHeaderString("x-ms-lease-action") != null) {
@@ -884,6 +885,11 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
         Response authFailure = authorizeWrite(request, filesystem, path);
         if (authFailure != null) {
             return authFailure;
+        }
+        if (!isHierarchicalNamespaceEnabled(request.accountName())) {
+            return new AzureErrorResponse("HierarchicalNamespaceNotEnabled",
+                    "This operation is only supported on a hierarchical namespace account.")
+                    .toDataLakeJsonResponse(Response.Status.BAD_REQUEST.getStatusCode());
         }
         return leaseService.exclusively(() -> {
             if (store.get(nsKey(request.accountName(), filesystem)).isEmpty()) {

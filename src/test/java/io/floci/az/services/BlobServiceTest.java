@@ -1814,6 +1814,21 @@ public class BlobServiceTest {
     }
 
     @Test
+    void dataLakeSetAccessControlRejectsFlatNamespaceAccount() {
+        String account = "flataccount";
+        given().put("/{account}/{container}?restype=container", account, CONTAINER);
+
+        given()
+            .header("Host", account + ".dfs.core.windows.net")
+            .header("x-ms-permissions", "0750")
+            .queryParam("action", "setAccessControl")
+            .when().patch("/{container}", CONTAINER)
+            .then()
+            .statusCode(400)
+            .header("x-ms-error-code", "HierarchicalNamespaceNotEnabled");
+    }
+
+    @Test
     void dataLakeConditionalCreateSupportsHadoopDefaultOverwriteProtocol() {
         given().put("/{account}/{container}?restype=container", ACCOUNT, CONTAINER);
 
