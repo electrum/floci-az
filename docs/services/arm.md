@@ -109,7 +109,7 @@ The subscription and tenant GUIDs are fixed
 - **Resource-group deletion does not cascade** — deleting a group leaves resources created under it
   behind (they still appear in `GET .../resources`, so Terraform's
   `prevent_deletion_if_contains_resources` works).
-- **`checkNameAvailability` always reports `nameAvailable: true`** — the emulator does not track
-  global name uniqueness.
+- **`checkNameAvailability` always reports `nameAvailable: true`**: storage account creation enforces
+  name uniqueness, but the availability endpoint does not yet consult that state.
 - **Shared Key / ARM auth is accepted but not verified** — any bearer token or Shared Key is
   honored, consistent with the rest of the emulator's permissive dev auth.

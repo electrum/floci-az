@@ -538,7 +538,12 @@ public class ArmHandler implements AzureServiceHandler {
             return switch (method) {
                 case "PUT"    -> createOrUpdateStorageAccount(req, sub, rg, account);
                 case "GET"    -> getStorageAccount(sub, rg, account);
-                case "DELETE" -> { storageAccounts.remove(saKey(sub, rg, account)); yield Response.ok().build(); }
+                case "DELETE" -> {
+                    synchronized (storageAccounts) {
+                        storageAccounts.remove(saKey(sub, rg, account));
+                    }
+                    yield Response.ok().build();
+                }
                 default       -> Response.status(405).build();
             };
         }
@@ -583,7 +588,23 @@ public class ArmHandler implements AzureServiceHandler {
                         "keySource", "Microsoft.Storage")
         ));
 
-        storageAccounts.put(saKey(sub, rg, account), resource);
+        synchronized (storageAccounts) {
+            Map<String, Object> existing = storageAccounts.get(saKey(sub, rg, account));
+            Map<String, Object> duplicate = storageAccounts.values().stream()
+                    .filter(candidate -> account.equals(candidate.get("name")))
+                    .filter(candidate -> candidate != existing)
+                    .findFirst()
+                    .orElse(null);
+            if (duplicate != null) {
+                if (sub.equals(duplicate.get("_sub"))) {
+                    return ArmErrors.error(409, "StorageAccountAlreadyExists",
+                            "The storage account named " + account + " already exists under the subscription.");
+                }
+                return ArmErrors.error(409, "StorageAccountAlreadyTaken",
+                        "The storage account named " + account + " is already taken.");
+            }
+            storageAccounts.put(saKey(sub, rg, account), resource);
+        }
         LOG.infof("ARM: created storage account %s", account);
         return Response.ok(stripInternal(resource)).build();
     }
