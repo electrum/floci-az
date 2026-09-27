@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -91,6 +92,7 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
     private final StorageBackend<String, StoredObject> store;
 
     private final EmulatorConfig config;
+    private final Map<String, Boolean> hierarchicalNamespaceOverrides = new ConcurrentHashMap<>();
 
     private final UserDelegationKeyService userDelegationKeyService;
     private final StorageSasAuthorization sasAuthorization;
@@ -847,6 +849,11 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
         Response authFailure = authorizeRead(request, filesystem, path);
         if (authFailure != null) {
             return authFailure;
+        }
+        if (!isHierarchicalNamespaceEnabled(request.accountName())) {
+            return new AzureErrorResponse("HierarchicalNamespaceNotEnabled",
+                    "This operation is only supported on a hierarchical namespace account.")
+                    .toDataLakeJsonResponse(Response.Status.BAD_REQUEST.getStatusCode());
         }
         if (store.get(nsKey(request.accountName(), filesystem)).isEmpty()) {
             return new AzureErrorResponse("FilesystemNotFound", "The specified filesystem does not exist.")
@@ -2799,11 +2806,25 @@ public class BlobServiceHandler implements AzureServiceHandler, Resettable {
         leaseService.exclusively(() -> {
             store.clear();
             leaseService.clear();
+            hierarchicalNamespaceOverrides.clear();
         });
     }
 
     public void ensureContainer(String accountName, String containerName) {
         leaseService.exclusively(() -> store.put(nsKey(accountName, containerName), NS_SENTINEL));
+    }
+
+    public void setHierarchicalNamespaceEnabled(String accountName, boolean enabled) {
+        hierarchicalNamespaceOverrides.put(accountName, enabled);
+    }
+
+    public void removeHierarchicalNamespaceOverride(String accountName) {
+        hierarchicalNamespaceOverrides.remove(accountName);
+    }
+
+    private boolean isHierarchicalNamespaceEnabled(String accountName) {
+        return hierarchicalNamespaceOverrides.getOrDefault(accountName,
+                config.services().blob().hierarchicalNamespaceAccounts().contains(accountName));
     }
 
     private static String nsKey(String accountName, String containerName) {

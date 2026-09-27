@@ -3,6 +3,7 @@ package io.floci.az.services.arm;
 import io.floci.az.config.EmulatorConfig;
 import io.floci.az.core.AzureRequest;
 import io.floci.az.core.AzureServiceHandler;
+import io.floci.az.core.Resettable;
 import io.floci.az.core.arm.ArmErrors;
 import io.floci.az.core.arm.ArmJson;
 import io.floci.az.core.arm.ArmPaths;
@@ -53,7 +54,7 @@ import java.util.function.Predicate;
  * </ul>
  */
 @ApplicationScoped
-public class ArmHandler implements AzureServiceHandler {
+public class ArmHandler implements AzureServiceHandler, Resettable {
 
     private static final Logger LOG = Logger.getLogger(ArmHandler.class);
 
@@ -570,7 +571,14 @@ public class ArmHandler implements AzureServiceHandler {
             return switch (method) {
                 case "PUT"    -> createOrUpdateStorageAccount(req, sub, rg, account);
                 case "GET"    -> getStorageAccount(sub, rg, account);
-                case "DELETE" -> { storageAccounts.remove(saKey(sub, rg, account)); yield Response.ok().build(); }
+                case "DELETE" -> {
+                    synchronized (this) {
+                        if (storageAccounts.remove(saKey(sub, rg, account)) != null) {
+                            blobHandler.removeHierarchicalNamespaceOverride(account);
+                        }
+                    }
+                    yield Response.ok().build();
+                }
                 default       -> Response.status(405).build();
             };
         }
@@ -589,6 +597,14 @@ public class ArmHandler implements AzureServiceHandler {
         }
         Map<String, Object> body = parseBody(req);
         String location = bodyString(body, "location", "eastus");
+        Map<String, Object> requestedProperties = cast(body.get("properties"));
+        Map<String, Object> existing = storageAccounts.get(saKey(sub, rg, account));
+        Map<String, Object> existingProperties = cast(existing == null ? null : existing.get("properties"));
+        boolean hnsEnabled = requestedProperties.containsKey("isHnsEnabled")
+                ? Boolean.TRUE.equals(requestedProperties.get("isHnsEnabled"))
+                : existingProperties.containsKey("isHnsEnabled")
+                        ? Boolean.TRUE.equals(existingProperties.get("isHnsEnabled"))
+                        : config.services().blob().hierarchicalNamespaceAccounts().contains(account);
         // Return domain-based storage endpoints so the azurerm provider can parse the account name.
         // The port is taken from the configured base URL so data-plane requests reach our emulator.
         String portStr = storagePortString();
@@ -605,6 +621,7 @@ public class ArmHandler implements AzureServiceHandler {
         resource.put("kind", "StorageV2");
         resource.put("properties", Map.of(
                 "provisioningState", "Succeeded",
+                "isHnsEnabled", hnsEnabled,
                 "primaryEndpoints", Map.of(
                         "blob",  "http://" + account + ".blob.core.windows.net" + portStr + "/",
                         "dfs",   "http://" + account + ".dfs.core.windows.net" + portStr + "/",
@@ -624,6 +641,7 @@ public class ArmHandler implements AzureServiceHandler {
         ));
 
         storageAccounts.put(saKey(sub, rg, account), resource);
+        blobHandler.setHierarchicalNamespaceEnabled(account, hnsEnabled);
         LOG.infof("ARM: created storage account %s", account);
         return Response.ok(stripInternal(resource)).build();
     }
@@ -953,6 +971,15 @@ public class ArmHandler implements AzureServiceHandler {
 
     private String tenantId() {
         return config.services().entra().defaultTenantId();
+    }
+
+    @Override
+    public void clear() {
+        resourceGroups.clear();
+        storageAccounts.clear();
+        keyVaults.clear();
+        managedHsms.clear();
+        webApps.clear();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

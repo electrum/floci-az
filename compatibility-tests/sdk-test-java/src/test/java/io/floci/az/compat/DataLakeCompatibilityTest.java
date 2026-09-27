@@ -4,6 +4,8 @@ import com.azure.core.credential.AccessToken;
 import com.azure.core.http.policy.HttpPipelinePolicy;
 import com.azure.core.http.rest.PagedResponse;
 import com.azure.core.util.Context;
+import com.azure.storage.blob.BlobContainerClient;
+import com.azure.storage.blob.BlobContainerClientBuilder;
 import com.azure.storage.common.StorageSharedKeyCredential;
 import com.azure.storage.file.datalake.DataLakeDirectoryClient;
 import com.azure.storage.file.datalake.DataLakeFileClient;
@@ -62,6 +64,37 @@ class DataLakeCompatibilityTest {
         assertTrue(file.exists());
 
         client.deleteFileSystem(name);
+    }
+
+    @Test
+    @DisplayName("access control: flat namespace account is rejected")
+    void flatNamespaceAccountRejectsAccessControl() {
+        String account = "flataccount";
+        String name = "test-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        StorageSharedKeyCredential credential = new StorageSharedKeyCredential(account, EmulatorConfig.DEV_KEY);
+        BlobContainerClient container = new BlobContainerClientBuilder()
+                .endpoint(EmulatorConfig.httpBase() + "/" + account)
+                .credential(credential)
+                .containerName(name)
+                .buildClient();
+        container.create();
+        try {
+            DataLakeServiceClient flatClient = new DataLakeServiceClientBuilder()
+                    .endpoint(EmulatorConfig.httpBase())
+                    .credential(credential)
+                    .addPolicy((context, next) -> {
+                        context.getHttpRequest().setHeader("Host", account + ".dfs.core.windows.net");
+                        return next.process();
+                    })
+                    .buildClient();
+
+            DataLakeStorageException failure = assertThrows(DataLakeStorageException.class,
+                    () -> flatClient.getFileSystemClient(name).getDirectoryClient("").getAccessControl());
+            assertEquals(400, failure.getStatusCode());
+            assertEquals("HierarchicalNamespaceNotEnabled", failure.getErrorCode());
+        } finally {
+            container.delete();
+        }
     }
 
     @Test

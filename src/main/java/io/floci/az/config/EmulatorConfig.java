@@ -503,6 +503,9 @@ public interface EmulatorConfig {
     interface BlobServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("devstoreaccount1")
+        List<String> hierarchicalNamespaceAccounts();
     }
 
     interface QueueServiceConfig {
