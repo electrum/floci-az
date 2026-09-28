@@ -211,4 +211,27 @@ class ArmStorageAccountTest {
             .statusCode(400)
             .header("x-ms-error-code", equalTo("HierarchicalNamespaceNotEnabled"));
     }
+
+    @Test
+    void invalidStorageAccountNameIsReportedUnavailable() {
+        given()
+            .contentType("application/json")
+            .body("{\"location\":\"eastus\"}")
+            .when().put("/subscriptions/sub-name/resourceGroups/rg-name"
+                    + "/providers/Microsoft.Storage/storageAccounts/flociupper1704?api-version=2023-01-01")
+            .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("{\"name\":\"FlociUpper1704\",\"type\":\"Microsoft.Storage/storageAccounts\"}")
+            .when().post("/subscriptions/sub-name/providers/Microsoft.Storage/checkNameAvailability"
+                    + "?api-version=2023-01-01")
+            .then()
+            .statusCode(200)
+            .body("nameAvailable", equalTo(false))
+            .body("reason", equalTo("AccountNameInvalid"))
+            .body("message", equalTo("FlociUpper1704 is not a valid storage account name. Storage account name "
+                    + "must be between 3 and 24 characters in length and use numbers and lower-case letters only."));
+    }
 }
