@@ -78,6 +78,80 @@ class ArmStorageAccountTest {
     }
 
     @Test
+    void storageAccountHierarchicalNamespaceCannotBeChanged() {
+        String path = "/subscriptions/sub-immutable/resourceGroups/rg-immutable"
+                + "/providers/Microsoft.Storage/storageAccounts/immutablehns?api-version=2023-01-01";
+
+        given()
+            .contentType("application/json")
+            .body("""
+                    {
+                      "location": "eastus",
+                      "properties": {"isHnsEnabled": true}
+                    }
+                    """)
+            .when().put(path)
+            .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                    {
+                      "location": "eastus",
+                      "properties": {"isHnsEnabled": false}
+                    }
+                    """)
+            .when().put(path)
+            .then()
+            .statusCode(400)
+            .body("error.code", equalTo("AccountPropertyCannotBeUpdated"))
+            .body("error.message", equalTo("The property 'isHnsEnabled' was specified in the input, but it cannot "
+                    + "be updated as it is read-only. For more information, see - "
+                    + "https://aka.ms/storageaccountupdate"));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                    {
+                      "location": "eastus",
+                      "properties": {"isHnsEnabled": true}
+                    }
+                    """)
+            .when().put(path)
+            .then()
+            .statusCode(200)
+            .body("properties.isHnsEnabled", equalTo(true));
+
+        String flatPath = "/subscriptions/sub-immutable/resourceGroups/rg-immutable"
+                + "/providers/Microsoft.Storage/storageAccounts/immutableflat?api-version=2023-01-01";
+        given()
+            .contentType("application/json")
+            .body("""
+                    {
+                      "location": "eastus",
+                      "properties": {"isHnsEnabled": false}
+                    }
+                    """)
+            .when().put(flatPath)
+            .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                    {
+                      "location": "eastus",
+                      "properties": {"isHnsEnabled": true}
+                    }
+                    """)
+            .when().put(flatPath)
+            .then()
+            .statusCode(400)
+            .body("error.code", equalTo("AccountPropertyCannotBeUpdated"));
+    }
+
+    @Test
     void deletingMissingStorageAccountDoesNotChangeConfiguredHierarchicalNamespace() {
         given().put("/devstoreaccount1/delete-missing-filesystem?restype=container");
 

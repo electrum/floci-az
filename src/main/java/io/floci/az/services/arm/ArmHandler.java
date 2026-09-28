@@ -600,10 +600,17 @@ public class ArmHandler implements AzureServiceHandler, Resettable {
         Map<String, Object> requestedProperties = cast(body.get("properties"));
         Map<String, Object> existing = storageAccounts.get(saKey(sub, rg, account));
         Map<String, Object> existingProperties = cast(existing == null ? null : existing.get("properties"));
+        boolean existingHnsEnabled = Boolean.TRUE.equals(existingProperties.get("isHnsEnabled"));
+        if (existing != null && requestedProperties.containsKey("isHnsEnabled")
+                && existingHnsEnabled != Boolean.TRUE.equals(requestedProperties.get("isHnsEnabled"))) {
+            return ArmErrors.error(400, "AccountPropertyCannotBeUpdated",
+                    "The property 'isHnsEnabled' was specified in the input, but it cannot be updated as it is "
+                            + "read-only. For more information, see - https://aka.ms/storageaccountupdate");
+        }
         boolean hnsEnabled = requestedProperties.containsKey("isHnsEnabled")
                 ? Boolean.TRUE.equals(requestedProperties.get("isHnsEnabled"))
                 : existingProperties.containsKey("isHnsEnabled")
-                        ? Boolean.TRUE.equals(existingProperties.get("isHnsEnabled"))
+                        ? existingHnsEnabled
                         : config.services().blob().hierarchicalNamespaceAccounts().contains(account);
         // Return domain-based storage endpoints so the azurerm provider can parse the account name.
         // The port is taken from the configured base URL so data-plane requests reach our emulator.
